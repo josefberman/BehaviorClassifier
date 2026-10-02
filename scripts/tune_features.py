@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tune behavior YAML overrides to match real order-parameter feature statistics."""
+"""Tune behavior YAML overrides to match real order-parameter means and stds."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 import yaml
 
 from src.labels import BEHAVIOR_SHORT, canonicalize
-from src.features.order_params import AGG_FEATURE_NAMES
+from src.features.order_params import FEATURE_NAMES
 from src.sim.config import CONFIG_DIR, deep_merge
 from src.tune.feature_match import BEST_PATH, tune_all_behaviors
 
@@ -27,7 +27,7 @@ def _print_feature_summary(summary: dict) -> None:
         if tgt is None:
             continue
         print(f"\n{behavior}:")
-        for feat in AGG_FEATURE_NAMES:
+        for feat in FEATURE_NAMES:
             sm = block[feat]["mean"]
             ss = block[feat]["std"]
             tm = tgt[feat]["mean"]

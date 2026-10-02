@@ -52,7 +52,10 @@ def main() -> None:
     summary = {k: report[k] for k in report if k != "classification_report"}
     print(json.dumps(summary, indent=2))
     if "accuracy" in report:
-        print(f"real_accuracy={report['accuracy']:.3f} macro_f1={report['macro_f1']:.3f}")
+        print(
+            f"real_balanced_accuracy={report.get('balanced_accuracy', float('nan')):.3f} "
+            f"macro_f1={report['macro_f1']:.3f}  accuracy={report['accuracy']:.3f}"
+        )
         if report.get("include_transitions") and "transition_macro_f1" in report:
             print(f"real_baseline_macro_f1={report.get('baseline_macro_f1', float('nan')):.3f}")
             print(f"real_transition_macro_f1={report['transition_macro_f1']:.3f}")

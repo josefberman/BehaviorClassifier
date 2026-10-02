@@ -11,18 +11,18 @@ import numpy as np
 from joblib import Parallel, delayed
 
 from scripts.generate_sims import _event_window, _overrides_for
-from src.features.order_params import AGG_FEATURE_NAMES
-from src.features.windows import feature_dict_to_array, segment_feature_vector
+from src.features.order_params import FEATURE_NAMES
+from src.features.windows import frame_feature_matrix
 from src.labels import CANONICAL
 from src.sim.config import deep_merge
 from src.sim.model_fast import run_simulation_fast
 
-# Primary order-parameter means drive most of the sim/real gap.
-FEATURE_WEIGHTS: dict[str, float] = {
-    "phi_trans_mean": 2.0,
-    "psi_tan_mean": 2.0,
-    "psi_rad_pm_mean": 3.0,
-}
+FEATURE_WEIGHTS: dict[str, float] = {name: 1.0 for name in FEATURE_NAMES}
+FEATURE_STD_FLOOR: dict[str, float] = {name: 0.03 for name in FEATURE_NAMES}
+
+
+def _n_samples(block: dict) -> int:
+    return int(block.get("n_frames", block.get("n_segments", block.get("n_clips", 0))))
 
 
 def load_calibration_targets(path: Path) -> dict[str, dict]:
@@ -41,14 +41,14 @@ def _aggregate(rows: dict[str, list[np.ndarray]]) -> dict[str, dict]:
     for behavior in sorted(rows):
         xs = np.vstack(rows[behavior])
         feat_stats = {}
-        for i, name in enumerate(AGG_FEATURE_NAMES):
+        for i, name in enumerate(FEATURE_NAMES):
             col = xs[:, i]
             feat_stats[name] = {
                 "mean": float(np.mean(col)),
                 "std": float(np.std(col)),
             }
         report[behavior] = {
-            "n_segments": int(len(xs)),
+            "n_frames": int(len(xs)),
             "features": feat_stats,
         }
     return report
@@ -74,8 +74,7 @@ def _run_one(
         pos, vel = pos[es:ee], vel[es:ee]
     if pos.shape[0] < 15:
         return None
-    feat = segment_feature_vector(pos, vel, fps=30.0)
-    return feature_dict_to_array(feat)
+    return frame_feature_matrix(pos, vel, fps=30.0)
 
 
 def summarize_behavior_sims(
@@ -96,29 +95,35 @@ def summarize_behavior_sims(
         if feat is not None:
             rows[behavior].append(feat)
     if not rows:
-        empty = {name: {"mean": 0.0, "std": 0.0} for name in AGG_FEATURE_NAMES}
-        return {behavior: {"n_segments": 0, "features": empty}}
+        empty = {name: {"mean": 0.0, "std": 0.0} for name in FEATURE_NAMES}
+        return {behavior: {"n_frames": 0, "features": empty}}
     return _aggregate(rows)
 
 
 def behavior_calibration_loss(
     sim_block: dict,
     target_block: dict,
-    *,
-    min_target_std: float = 0.03,
 ) -> float:
-    """Weighted MSE between sim and target feature means (lower is better)."""
-    if sim_block.get("n_segments", 0) == 0:
+    """Weighted MSE of sim vs real feature means and stds (lower is better).
+
+    Each Φ contributes equally-weighted mean and std residuals, scaled by the
+    real-frame std so a 0.05 miss costs the same for location and spread.
+    """
+    if _n_samples(sim_block) == 0:
         return float("inf")
 
     total = 0.0
     n = 0
-    for feat in AGG_FEATURE_NAMES:
-        sm = sim_block["features"][feat]["mean"]
-        tm = target_block["features"][feat]["mean"]
-        tw = max(float(target_block["features"][feat]["std"]), min_target_std)
-        w = FEATURE_WEIGHTS.get(feat, 1.0) / tw
-        total += w * (sm - tm) ** 2
+    for feat in FEATURE_NAMES:
+        stats_s = sim_block["features"][feat]
+        stats_t = target_block["features"][feat]
+        sm = float(stats_s["mean"])
+        ss = float(stats_s["std"])
+        tm = float(stats_t["mean"])
+        ts = float(stats_t["std"])
+        scale = max(ts, FEATURE_STD_FLOOR[feat])
+        w = FEATURE_WEIGHTS[feat]
+        total += w * (((sm - tm) / scale) ** 2 + ((ss - ts) / scale) ** 2)
         n += 1
     return total / max(n, 1)
 
@@ -136,7 +141,7 @@ def total_calibration_loss(
             continue
         sim_block = sim_report.get(
             behavior,
-            {"n_segments": 0, "features": {}},
+            {"n_frames": 0, "features": {}},
         )
         losses.append(behavior_calibration_loss(sim_block, target_report[behavior]))
     if not losses:

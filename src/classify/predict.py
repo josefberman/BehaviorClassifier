@@ -8,7 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.features.order_params import AGG_FEATURE_NAMES
+from src.features.order_params import FEATURE_NAMES
 from src.features.windows import frame_feature_matrix
 from src.sim.io import load_trajectory_table, pos_vel_from_table, save_trajectory_table
 
@@ -21,7 +21,6 @@ def predict_trajectory(
     out_path: Path | None = None,
     *,
     fps: float = 30.0,
-    window_sec: float = 2.0,
     column: str = "predicted_behavior",
 ) -> pd.DataFrame:
     """Label each frame and write a same-type copy with an extra behavior column."""
@@ -37,9 +36,9 @@ def predict_trajectory(
     bundle = joblib.load(model_path)
     model = bundle["model"]
     le = bundle["label_encoder"]
-    names = list(bundle.get("feature_names") or AGG_FEATURE_NAMES)
+    names = list(bundle.get("feature_names") or FEATURE_NAMES)
 
-    X = frame_feature_matrix(pos, vel, window_sec=window_sec, fps=fps, names=names)
+    X = frame_feature_matrix(pos, vel, fps=fps, names=names)
     pred = le.inverse_transform(np.asarray(model.predict(X)))
 
     out = df.copy()

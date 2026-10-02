@@ -50,7 +50,7 @@ def run_trial(
     n_seeds: int = 40,
     n_values: list[int] | None = None,
     n_jobs: int = -1,
-    mode: str = "segment",
+    mode: str = "frame",
     min_valid_frac: float = 0.85,
     show_progress: bool = True,
 ) -> dict[str, Any]:
@@ -146,7 +146,7 @@ def tune_loop(
     n_jobs: int = -1,
     objective: str = "real_macro_f1",
     jitter: float = 0.35,
-    mode: str = "segment",
+    mode: str = "frame",
     show_progress: bool = True,
 ) -> dict[str, Any]:
     """Random-search loop optimizing real eval metrics."""

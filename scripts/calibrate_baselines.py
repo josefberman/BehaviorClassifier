@@ -19,25 +19,30 @@ from src.features.dataset import (
     load_manifest,
     load_real_segments,
 )
-from src.features.order_params import AGG_FEATURE_NAMES
-from src.features.windows import feature_dict_to_array, segment_feature_vector
+from src.features.order_params import FEATURE_NAMES
+from src.features.windows import frame_feature_matrix
 from src.labels import CANONICAL, is_transition
 from src.sim.io import load_trajectory_csv
 
 
-def _aggregate(rows: dict[str, list[np.ndarray]]) -> dict[str, dict]:
+def _aggregate(
+    rows: dict[str, list[np.ndarray]],
+    *,
+    n_segments: dict[str, int] | None = None,
+) -> dict[str, dict]:
     report: dict[str, dict] = {}
     for behavior in sorted(rows):
         xs = np.vstack(rows[behavior])
         feat_stats = {}
-        for i, name in enumerate(AGG_FEATURE_NAMES):
+        for i, name in enumerate(FEATURE_NAMES):
             col = xs[:, i]
             feat_stats[name] = {
                 "mean": float(np.mean(col)),
                 "std": float(np.std(col)),
             }
         report[behavior] = {
-            "n_segments": int(len(xs)),
+            "n_frames": int(len(xs)),
+            "n_segments": int((n_segments or {}).get(behavior, 0)),
             "features": feat_stats,
         }
     return report
@@ -51,6 +56,7 @@ def _summarize_sim(
     valid_only: bool = True,
 ) -> dict[str, dict]:
     rows: dict[str, list[np.ndarray]] = defaultdict(list)
+    n_segs: dict[str, int] = defaultdict(int)
     allowed = set(CANONICAL)
     for entry in load_manifest(manifest_path):
         behavior = entry.get("behavior", "")
@@ -62,9 +68,14 @@ def _summarize_sim(
         csv_path = sim_root / entry["csv"]
         if not csv_path.exists():
             continue
-        for feat_vec, label in features_from_sim_entry(entry, sim_root=sim_root):
-            rows[label if include_transitions else behavior].append(feat_vec)
-    return _aggregate(rows)
+        added = None
+        for feat_vec, label in features_from_sim_entry(entry, mode="frame", sim_root=sim_root):
+            key = label if include_transitions else behavior
+            rows[key].append(feat_vec)
+            added = key
+        if added is not None:
+            n_segs[added] += 1
+    return _aggregate(rows, n_segments=n_segs)
 
 
 def _summarize_real(
@@ -74,6 +85,7 @@ def _summarize_real(
     min_frames: int = 15,
 ) -> dict[str, dict]:
     rows: dict[str, list[np.ndarray]] = defaultdict(list)
+    n_segs: dict[str, int] = defaultdict(int)
     allowed = set(CANONICAL)
     for seg in load_real_segments(annotations_dir=annotations_dir):
         label = seg["label"]
@@ -84,17 +96,22 @@ def _summarize_real(
         a, b = seg["start"], min(seg["end"], pos.shape[0])
         if b - a < min_frames:
             continue
-        feat = segment_feature_vector(pos[a:b], vel[a:b], fps=seg["fps"])
-        rows[label].append(feature_dict_to_array(feat))
-    return _aggregate(rows)
+        X = frame_feature_matrix(pos[a:b], vel[a:b], fps=seg["fps"])
+        if X.shape[0] == 0:
+            continue
+        rows[label].append(X)
+        n_segs[label] += 1
+    return _aggregate(rows, n_segments=n_segs)
 
 
 def _print_report(report: dict[str, dict], *, title: str) -> None:
     print(title)
     for behavior, block in report.items():
-        n = block.get("n_segments", block.get("n_clips", 0))
-        print(f"{behavior}  (n={n})")
-        for name in AGG_FEATURE_NAMES:
+        n = block.get("n_frames", block.get("n_segments", block.get("n_clips", 0)))
+        n_seg = block.get("n_segments")
+        extra = f", {n_seg} segments" if n_seg else ""
+        print(f"{behavior}  (n={n} frames{extra})")
+        for name in FEATURE_NAMES:
             stats = block["features"][name]
             print(f"  {name:16s}  mean={stats['mean']:+.4f}  std={stats['std']:.4f}")
         print()
@@ -102,7 +119,7 @@ def _print_report(report: dict[str, dict], *, title: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Mean/std of segment features per behavior (sim manifest and/or real annotations).",
+        description="Mean/std of per-frame order parameters per behavior (sim manifest and/or real annotations).",
     )
     parser.add_argument(
         "--source",

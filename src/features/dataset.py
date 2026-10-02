@@ -7,8 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from src.features.order_params import AGG_FEATURE_NAMES
-from src.features.windows import feature_dict_to_array, segment_feature_vector, sliding_window_features
+from src.features.order_params import AGG_FEATURE_NAMES, FEATURE_NAMES
+from src.features.windows import (
+    feature_dict_to_array,
+    frame_feature_matrix,
+    segment_feature_vector,
+    sliding_window_features,
+)
 from src.labels import canonicalize, is_transition, label_set, load_aliases
 from src.sim.io import load_motion_json, load_trajectory_csv, mmss_to_frame
 
@@ -34,6 +39,10 @@ def _transition_morph_range(entry: dict, n_frames: int) -> tuple[int, int]:
     return _clip_frame_range(morph_start, morph_end, n_frames)
 
 
+def _names_for_mode(mode: str) -> list[str]:
+    return list(FEATURE_NAMES) if mode == "frame" else list(AGG_FEATURE_NAMES)
+
+
 def features_from_sim_entry(
     entry: dict,
     mode: str = "segment",
@@ -44,6 +53,7 @@ def features_from_sim_entry(
 
     Baseline clips use the full recording. Transition clips use only the morph
     window (morph_start .. morph_end) so features match real transition segments.
+    mode='frame' emits one row per frame (instantaneous Φ values).
     """
     sim_root = sim_root or (ROOT / "sim_datasets")
     csv_path = Path(entry["csv"])
@@ -56,6 +66,15 @@ def features_from_sim_entry(
     if entry.get("morph_start") is not None:
         a, b = _transition_morph_range(entry, pos.shape[0])
         pos, vel = pos[a:b], vel[a:b]
+
+    if mode == "frame":
+        if entry.get("event_start") is not None:
+            a = int(entry["event_start"])
+            b = int(entry.get("event_end", min(pos.shape[0], a + 200)))
+            a, b = _clip_frame_range(a, b, pos.shape[0])
+            pos, vel = pos[a:b], vel[a:b]
+        X = frame_feature_matrix(pos, vel, fps=fps)
+        return [(row, label) for row in X]
 
     if mode == "windows":
         feats = sliding_window_features(pos, vel, window_sec=window_sec, fps=fps)
@@ -77,7 +96,7 @@ def build_sim_xy(
     split: str | None = None,
     manifest_path: Path | None = None,
     sim_root: Path | None = None,
-    mode: str = "segment",
+    mode: str = "frame",
     include_transitions: bool = True,
     stable_only: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
@@ -105,9 +124,10 @@ def build_sim_xy(
         for x, y in features_from_sim_entry(e, mode=mode, sim_root=sim_root):
             xs.append(x)
             ys.append(y)
+    names = _names_for_mode(mode)
     if not xs:
-        return np.zeros((0, len(AGG_FEATURE_NAMES))), np.array([], dtype=object), list(AGG_FEATURE_NAMES)
-    return np.vstack(xs), np.array(ys, dtype=object), list(AGG_FEATURE_NAMES)
+        return np.zeros((0, len(names))), np.array([], dtype=object), names
+    return np.vstack(xs), np.array(ys, dtype=object), names
 
 
 def load_real_segments(
@@ -158,6 +178,7 @@ def build_real_xy(
     min_frames: int = 15,
     include_transitions: bool = True,
     stable_only: bool = False,
+    mode: str = "frame",
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[dict]]:
     segs = load_real_segments()
     if not include_transitions:
@@ -168,10 +189,18 @@ def build_real_xy(
         a, b = s["start"], min(s["end"], pos.shape[0])
         if b - a < min_frames:
             continue
-        feat = segment_feature_vector(pos[a:b], vel[a:b], fps=s["fps"])
-        xs.append(feature_dict_to_array(feat))
-        ys.append(s["label"])
-        kept.append(s)
+        if mode == "frame":
+            X = frame_feature_matrix(pos[a:b], vel[a:b], fps=s["fps"])
+            for row in X:
+                xs.append(row)
+                ys.append(s["label"])
+                kept.append(s)
+        else:
+            feat = segment_feature_vector(pos[a:b], vel[a:b], fps=s["fps"])
+            xs.append(feature_dict_to_array(feat))
+            ys.append(s["label"])
+            kept.append(s)
+    names = _names_for_mode(mode)
     if not xs:
-        return np.zeros((0, len(AGG_FEATURE_NAMES))), np.array([], dtype=object), list(AGG_FEATURE_NAMES), []
-    return np.vstack(xs), np.array(ys, dtype=object), list(AGG_FEATURE_NAMES), kept
+        return np.zeros((0, len(names))), np.array([], dtype=object), names, []
+    return np.vstack(xs), np.array(ys, dtype=object), names, kept

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.features.order_params import FEATURE_NAMES
 from src.labels import CANONICAL, canonicalize
 from src.tune.calibration import (
     behavior_calibration_loss,
@@ -22,7 +23,20 @@ from src.tune.calibration import (
     summarize_behavior_sims,
     total_calibration_loss,
 )
-from src.tune.search_space import round_overrides, space_filling_samples
+from src.tune.search_space import random_samples, round_overrides
+
+
+def _feat_progress(sf: dict) -> str:
+    parts = []
+    for name in FEATURE_NAMES:
+        short = name.removeprefix("phi_")
+        m = sf[name]["mean"]
+        s = sf[name]["std"]
+        if name == "phi_rad_pm":
+            parts.append(f"{short}={m:+.3f}±{s:.3f}")
+        else:
+            parts.append(f"{short}={m:.3f}±{s:.3f}")
+    return "  ".join(parts)
 
 
 def _canonical_behavior_map(d: dict[str, Any] | None) -> dict[str, Any]:
@@ -55,16 +69,18 @@ def tune_behavior(
     rng: np.random.Generator | None = None,
     show_progress: bool = True,
 ) -> dict[str, Any]:
-    """Latin-hypercube search of overrides for a single behavior against real feature targets."""
+    """Random search of overrides for a single behavior against real feature targets."""
     if behavior not in target_report:
         raise ValueError(f"No target stats for {behavior}")
 
     n_values = n_values or [20, 40]
     rng = rng or np.random.default_rng()
     target_block = target_report[behavior]
-    candidates = space_filling_samples(behavior, n_trials, rng)
+    candidates = random_samples(behavior, n_trials, rng)
     if show_progress:
-        print(f"  Latin hypercube: {len(candidates)} points in {len(candidates[0]) if candidates else 0}D")
+        print(f"  random search: {len(candidates)} points in {len(candidates[0]) if candidates else 0}D")
+        print(f"  matching mean+std of {len(FEATURE_NAMES)} frame features: {', '.join(FEATURE_NAMES)}")
+        print(f"  target  {_feat_progress(target_block['features'])}")
 
     best_loss = float("inf")
     best_overrides: dict = {}
@@ -85,19 +101,16 @@ def tune_behavior(
             "trial": trial_idx + 1,
             "loss": loss,
             "score": score,
-            "n_segments": sim_report[behavior]["n_segments"],
+            "n_frames": sim_report[behavior]["n_frames"],
             "overrides": round_overrides({behavior: ov})[behavior],
             "sim_features": sim_report[behavior]["features"],
         }
         trials.append(record)
 
         if show_progress:
-            sf = sim_report[behavior]["features"]
             print(
                 f"  trial {trial_idx + 1:4d}/{n_trials}  loss={loss:.4f}  "
-                f"phi_trans={sf['phi_trans_mean']['mean']:.3f}  "
-                f"psi_tan={sf['psi_tan_mean']['mean']:.3f}  "
-                f"psi_rad={sf['psi_rad_pm_mean']['mean']:+.3f}"
+                f"{_feat_progress(sim_report[behavior]['features'])}"
             )
 
         if loss < best_loss:

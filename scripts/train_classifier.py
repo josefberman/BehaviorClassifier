@@ -59,7 +59,7 @@ def main() -> None:
     )
     summary = {k: report[k] for k in report if k != "classification_report"}
     print(json.dumps(summary, indent=2))
-    print(f"real_macro_f1={report['best_real_macro_f1']:.3f}")
+    print(f"sim_macro_f1={report['best_sim_macro_f1']:.3f}")
 
 
 if __name__ == "__main__":

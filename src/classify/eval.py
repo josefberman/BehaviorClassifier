@@ -7,7 +7,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
-from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.metrics import balanced_accuracy_score, classification_report, confusion_matrix, f1_score
 
 from src.features.dataset import build_real_xy
 from src.labels import is_transition, ordered_labels
@@ -42,6 +42,7 @@ def eval_real(
     X_all, y_all, _, _meta_all = build_real_xy(
         include_transitions=include_transitions,
         stable_only=stable_only,
+        mode="frame",
     )
     known = set(le.classes_)
     known_mask = np.array([yi in known for yi in y_all])
@@ -64,6 +65,7 @@ def eval_real(
 
     pred = le.inverse_transform(model.predict(X))
     report["accuracy"] = float(np.mean(pred == y))
+    report["balanced_accuracy"] = float(balanced_accuracy_score(y, pred))
     report["macro_f1"] = float(
         f1_score(y, pred, average="macro", labels=eval_labels, zero_division=0)
     )
@@ -78,6 +80,9 @@ def eval_real(
     if base_mask.any():
         base_labels = ordered_labels({yi for yi in y[base_mask]})
         report["baseline_accuracy"] = float(np.mean(pred[base_mask] == y[base_mask]))
+        report["baseline_balanced_accuracy"] = float(
+            balanced_accuracy_score(y[base_mask], pred[base_mask])
+        )
         report["baseline_macro_f1"] = float(
             f1_score(
                 y[base_mask],
@@ -90,6 +95,9 @@ def eval_real(
     if trans_mask.any():
         trans_labels = ordered_labels({yi for yi in y[trans_mask]})
         report["transition_accuracy"] = float(np.mean(pred[trans_mask] == y[trans_mask]))
+        report["transition_balanced_accuracy"] = float(
+            balanced_accuracy_score(y[trans_mask], pred[trans_mask])
+        )
         report["transition_macro_f1"] = float(
             f1_score(
                 y[trans_mask],
