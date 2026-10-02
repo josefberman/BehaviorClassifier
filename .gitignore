@@ -8,3 +8,4 @@ venv/
 results/
 sim_datasets/
 schooling-datasets/
+mcp.json
