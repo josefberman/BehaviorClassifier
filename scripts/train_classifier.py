@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Train XGBoost on 0.5 s windows from annotated real trajectories."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,56 +12,39 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.classify.train import train_classifier
+from src.features.windows import WINDOW_SEC
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train classifier on simulated features.")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--transitions",
-        action="store_true",
-        default=None,
-        help="Include X_to_Y transition clips from the sim manifest (default: auto-detect)",
-    )
-    group.add_argument(
-        "--no-transitions",
-        "--stable-only",
-        action="store_false",
-        dest="transitions",
-        help="Train on baseline clips only (tpol, milling, shoaling, e+, e−); exclude transitions",
-    )
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=ROOT / "sim_datasets" / "manifest.json",
-        help="Path to sim manifest.json",
-    )
-    parser.add_argument(
-        "--sim-root",
-        type=Path,
-        default=None,
-        help="Sim dataset root (default: parent of manifest)",
+    parser = argparse.ArgumentParser(
+        description="Train a leave-one-video-out XGBoost classifier on annotated schooling videos."
     )
     parser.add_argument(
         "--out-dir",
         type=Path,
         default=ROOT / "results",
-        help="Directory for classifier.joblib and sim_test_metrics.json",
+        help="Directory for classifier.joblib and cv_metrics.json",
+    )
+    parser.add_argument(
+        "--window-sec",
+        type=float,
+        default=WINDOW_SEC,
+        help="Window length in seconds (default: 0.5)",
     )
     args = parser.parse_args()
 
-    sim_root = args.sim_root or args.manifest.parent
-    stable_only = args.transitions is False
-    report = train_classifier(
-        out_dir=args.out_dir,
-        manifest_path=args.manifest,
-        sim_root=sim_root,
-        include_transitions=False if stable_only else args.transitions,
-        stable_only=stable_only,
-    )
-    summary = {k: report[k] for k in report if k != "classification_report"}
+    report = train_classifier(out_dir=args.out_dir, window_sec=args.window_sec)
+    oof = report["oof"]
+    summary = {
+        "n_windows": report["n_windows"],
+        "n_videos": report["n_videos"],
+        "best_params": report["best_params"],
+        "oof_macro_f1": oof["macro_f1"],
+        "oof_balanced_accuracy": oof["balanced_accuracy"],
+        "oof_accuracy": oof["accuracy"],
+    }
     print(json.dumps(summary, indent=2))
-    print(f"sim_macro_f1={report['best_sim_macro_f1']:.3f}")
+    print(f"oof_macro_f1={oof['macro_f1']:.3f}")
 
 
 if __name__ == "__main__":

@@ -1,42 +1,42 @@
 # School Motion Classifier
 
-Simulate five fish-school behaviours with one Couzin-zone dynamical model, extract collective order parameters, train a classifier on simulations, and evaluate on held-out sims plus manually annotated real trajectories.
+XGBoost classifier of 2D fish-school motion from five collective order parameters. Training uses the annotated real trajectories only.
 
 ## Behaviours
 
-Behavior differences come from a 13-parameter set (`r_r, r_o, r_a, w_r, w_o, w_a, w_tan, w_rad, sigma_theta, s_0, sigma_s, omega_max, a_max`). Expansion/compaction are signed radial steering (`w_rad`); milling is tangential steering (`w_tan`).
+| Label | Description |
+| --- | --- |
+| `traveling` | Common heading; high translational order |
+| `milling` | Circulation around the school centroid |
+| `shoaling` | Cohesion with little global heading |
+| `expansion` | Outward radial organization |
+| `compaction` | Inward radial organization |
 
-| Canonical label       | Short      | Description                                        |
-| --------------------- | ---------- | -------------------------------------------------- |
-| `traveling_polarized` | tpol       | High `w_o`, low `sigma_theta`; net translation     |
-| `milling`             | milling    | `w_tan > 0`; rotation about the school centroid |
-| `shoaling`            | shoaling   | Weak `w_o`, larger `sigma_theta`; low polarization |
-| `expansion_burst`     | expansion  | `w_rad > 0`; outward radial tendency           |
-| `compaction`          | compaction | `w_rad < 0`; inward radial tendency            |
+Directed transitions are separate classes (`traveling_to_milling`, `expansion_to_compaction`, …). The label set is the five behaviours plus all 20 `a_to_b` pairs (25 names). Classes with no windows yet stay in the list so later annotations reuse the same names. Older annotation strings (`traveling_polarized`, `polarized`, `burst`, `e+`, `contraction`, …) resolve through [`annotations/_label_aliases.json`](annotations/_label_aliases.json).
 
-`fountain_evasion` remains as an unused YAML stub and is not part of the five-class training set.
+## Features
 
-## Simulator
+Each sample is the mean of five per-frame order parameters over a non-overlapping **0.5 s** window (15 frames at 29.97 fps). Leftover frames shorter than 0.5 s are dropped.
 
-One model for all behaviors. Social interactions use exclusive Couzin zones (`d < r_r` repulsion, `r_r ≤ d < r_o` orientation, `r_o ≤ d < r_a` attraction). Heading noise `epsilon_w_i` and speed noise `epsilon_a_i` are sampled i.i.d. `Normal(0,1)` each step and are not YAML parameters. Arena, `dt`, `burn_in`, and `record_frames` are simulation metadata.
+- **φ_trans** — magnitude of the mean unit heading (moving fish only).
+- **φ_tan**, **φ_rad^±** — anisotropy-corrected correlations: center `r̂` and `v̂` by their school means, then `φ_tan = |∑ (r' × v')_z| / D` and `φ_rad^± = (∑ r' · v') / D`.
+- **φ_tan^unsigned** — fraction of centroid-relative kinetic energy in the tangential direction. Clockwise and counterclockwise both add.
+- **φ_local** — mean, over fish with at least one neighbor inside radius **90**, of the magnitude of the mean unit heading of those neighbors (focal fish excluded).
 
-Classifier inputs: instantaneous per-frame **Φ_trans**, **Φ_tan**, **Φ_rad^±**, **Φ_tan^unsigned**, and **Φ_local** (5 nearest neighbors). Training and evaluation inverse-weight classes by frame count.
+Degenerate frames: zero speed omits that fish from heading averages; a fish at the centroid is omitted from `r̂`; a vanishing correlation denominator, no centroid-relative motion, or no neighbor inside 90 yield 0 for the corresponding feature.
 
 ## Layout
 
 ```
-src/sim/           # Couzin-zone simulator + IO
-src/features/      # order parameters, windows, dataset builders
-src/classify/      # train / eval
-configs/behaviors/ # frozen YAML parameter sets
-scripts/           # CLI entry points
-sim_datasets/      # generated trajectories + manifest.json
-schooling-datasets/# real trajectories
-annotations/       # real segment labels (test)
-results/           # models + metrics
+src/io.py          # trajectory CSV / H5 / annotation JSON
+src/features/      # order parameters, 0.5 s windows, dataset builder
+src/classify/      # train / predict
+src/labels.py      # canonical names + aliases
+annotations/       # per-video segment labels
+schooling-datasets/# trajectories (r = x,y and v = px,py)
+scripts/           # CLI
+results/           # classifier.joblib + cv_metrics.json
 ```
-
-
 
 ## Setup
 
@@ -44,91 +44,25 @@ results/           # models + metrics
 pip install -r requirements.txt
 ```
 
+## Train
 
-
-## Generate simulations
-
-Generate sims × 5 behaviours × group sizes with train/test split.
+Leave-one-video-out over the 10 dataset ids. Inner leave-one-video-out selects `max_depth`, `learning_rate`, and `n_estimators` by macro-F1. Sample weights are `1 / n_class`. Reported scores are the pooled out-of-fold predictions. A model is then refit on all windows.
 
 ```bash
-python scripts/generate_sims.py --n-jobs 8
-# quick check:
-python scripts/generate_sims.py --smoke --n-jobs 4
-```
-
-
-
-### Publication figures / video
-
-Clean white-background stills (300 dpi PNG) and optional MP4/GIF. Fish are dark discs with short heading ticks; circular arena outline only.
-
-```bash
-# While generating (stills for seed 0 only + video):
-python scripts/generate_sims.py --smoke --render --video --render-seeds 0 --n-jobs 2
-
-# From existing sim_datasets (manuscript set: one clip per behaviour):
-python scripts/render_sims.py --manuscript --video
-
-# Selected clips:
-python scripts/render_sims.py --n-values 30 --seeds 0 --video
-```
-
-Outputs land in `sim_datasets/.../renders/` or `results/figures/<behavior>/`.
-
-## Calibrate / inspect signatures
-
-Summarizes mean/std of the five per-frame order-parameter features per behavior. Default source is generated sims (`sim_datasets/manifest.json`); use `--source real` for manual annotations.
-
-```bash
-python scripts/calibrate_baselines.py
-python scripts/calibrate_baselines.py --source real
-python scripts/calibrate_baselines.py --source both
-```
-
-
-
-## Train & evaluate
-
-```bash
-# Default: include transition clips/segments when manifest/model supports them
 python scripts/train_classifier.py
-python scripts/eval_real.py
-
-# Stable states only (tpol, milling, shoaling) — no transition labels
-python scripts/train_classifier.py --stable-only
-python scripts/eval_real.py --stable-only
-```
-
-`--stable-only` is an alias for `--no-transitions`.
-
-Outputs:
-
-- `results/classifier.joblib`
-- `results/sim_test_metrics.json`
-- `results/real_eval_metrics.json`
-- `results/sim_confusion.png` / `results/real_confusion.png`
-- `results/calibration_report.json`
-
-```bash
 python scripts/plot_confusion.py
 ```
 
+Outputs:
 
+- `results/classifier.joblib` — refit model, label encoder, full 25-name list
+- `results/cv_metrics.json` — per-fold and pooled OOF metrics
+- `results/cv_confusion.png`
 
-## Dataset split
+## Predict
 
+```bash
+python scripts/predict_trajectory.py path/to/traj.csv results/classifier.joblib out.csv
+```
 
-| Split | Seeds | Count |
-| ----- | ----- | ----- |
-| train | 0–79  | 2880  |
-| test  | 80–99 | 720   |
-
-
-
-
-## Real data notes
-
-- Label aliases live in `annotations/_label_aliases.json` (`polarized`→`traveling_polarized`, `burst`/`spread`→`expansion_burst`, …).
-- Real annotations are class-imbalanced; fountain/burst are rare; **compaction has no real labels** and is excluded from real eval.
-- Expect a sim↔real domain gap: the model is trained only on simulations; real metrics are a secondary sanity check.
-
+Each 0.5 s window is labelled and that label is repeated across the window’s frames.

@@ -1,10 +1,9 @@
-"""Collective order parameters for five-class motion classification."""
+"""Collective order parameters for behavior classification."""
 
 from __future__ import annotations
 
 import numpy as np
 
-# Instantaneous per-frame values are the classifier inputs.
 FEATURE_NAMES = (
     "phi_trans",
     "phi_tan",
@@ -13,39 +12,56 @@ FEATURE_NAMES = (
     "phi_local",
 )
 
-K_LOCAL = 5
+R_LOCAL = 90.0
+_EPS = 1e-12
+_SPEED_EPS = 1e-9
 
 
 def _unit_vectors(vel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     speeds = np.linalg.norm(vel, axis=-1)
     hat_v = np.zeros_like(vel)
-    moving = speeds > 1e-9
+    moving = speeds > _SPEED_EPS
     hat_v[moving] = vel[moving] / speeds[moving, None]
     return hat_v, moving
 
 
-def _local_alignment(pos: np.ndarray, hat_v: np.ndarray, k: int = K_LOCAL) -> np.ndarray:
-    """Mean neighborhood polarization over k nearest neighbors (excluding self)."""
+def _local_alignment(
+    pos: np.ndarray,
+    hat_v: np.ndarray,
+    moving: np.ndarray,
+    radius: float = R_LOCAL,
+) -> np.ndarray:
+    """Mean neighborhood polarization for neighbors strictly inside `radius`.
+
+    The focal fish is excluded. Zero-speed neighbors are omitted from the
+    heading average. Fish with no valid neighbor are skipped; if none remain,
+    the frame value is 0.
+    """
     t, n, _ = pos.shape
     if n <= 1:
         return np.zeros(t)
-    k = min(int(k), n - 1)
+    r2 = float(radius) ** 2
     out = np.zeros(t)
-    # Chunk time so the T×N×N distance cube stays in cache / RAM.
     step = 64 if n * n * 64 * 8 < 256 * 1024 * 1024 else max(1, 8_000_000 // max(n * n, 1))
     idx = np.arange(n)
     for start in range(0, t, step):
         sl = slice(start, min(t, start + step))
         block = pos[sl]
         hv = hat_v[sl]
+        mv = moving[sl]
         tb = block.shape[0]
         delta = block[:, :, None, :] - block[:, None, :, :]
         d2 = np.einsum("tijn,tijn->tij", delta, delta)
         d2[:, idx, idx] = np.inf
-        nn = np.argpartition(d2, kth=k - 1, axis=-1)[..., :k]
-        t_idx = np.arange(tb)[:, None, None]
-        neigh_v = hv[t_idx, nn]
-        out[sl] = np.linalg.norm(neigh_v.mean(axis=2), axis=-1).mean(axis=1)
+        neigh = (d2 < r2) & mv[:, None, :]
+        counts = neigh.sum(axis=2)
+        has = counts > 0
+        summed = np.einsum("tij,tjk->tik", neigh.astype(np.float64), hv)
+        mean_v = np.zeros_like(summed)
+        np.divide(summed, counts[..., None], out=mean_v, where=has[..., None])
+        mags = np.linalg.norm(mean_v, axis=-1)
+        n_has = has.sum(axis=1)
+        np.divide((mags * has).sum(axis=1), n_has, out=out[sl], where=n_has > 0)
     return out
 
 
@@ -64,18 +80,21 @@ def compute_order_params_series(
 ) -> dict[str, np.ndarray]:
     """Vectorized over time. positions, velocities: (T, N, 2).
 
-    Φ_trans = ||⟨v̂_i⟩||
+    Φ_trans = ||⟨v̂_i⟩|| over moving fish.
 
-    Center unit headings and radial vectors:
-        v'_i = v̂_i − v̄ ,  r'_i = r̂_i − r̄
+    Anisotropy-corrected correlations (centered unit fields):
+        v'_i = v̂_i − ⟨v̂⟩ ,  r'_i = r̂_i − ⟨r̂⟩
         D = sqrt( (∑_i ||v'_i||²) (∑_i ||r'_i||²) )
+        Φ_rad^± = (∑_i r'_i · v'_i) / D
+        Φ_tan   = |∑_i (r'_i × v'_i)_z| / D
 
-    Φ_rad^± = (∑_i v'_i · r'_i) / D
-    Φ_tan   = |∑_i (r'_i × v'_i)_z| / D
-
-    With actual relative kinematics q_i = x_i − x̄, u_i = v_i − v̄, r̂_i = q_i / ||q_i||:
-    Φ_tan^unsigned = ∑_i [(r̂_i × u_i)_z]² / ∑_i ||u_i||²
-    Φ_local        = (1/N) ∑_i || (1/|N_i|) ∑_{j∈N_i} v̂_j ||   (k=5 nearest neighbors)
+    Degenerate frames:
+        zero speed            — omit from heading averages; if none move, Φ_trans = 0
+                                and the centered correlations are 0
+        fish at the centroid  — omit from r̂; it does not enter Φ_tan or Φ_rad^±
+        D ≈ 0                 — Φ_tan = Φ_rad^± = 0
+        no centroid-relative motion — Φ_tan^unsigned = 0
+        no neighbor inside R_LOCAL — skip that fish in Φ_local; if none remain, 0
     """
     pos = np.asarray(positions, dtype=np.float64)
     vel = np.asarray(velocities, dtype=np.float64)
@@ -87,38 +106,50 @@ def compute_order_params_series(
         z = np.zeros(t)
         return {k: z.copy() for k in FEATURE_NAMES}
 
-    hat_v, _ = _unit_vectors(vel)
-
-    phi_trans = np.linalg.norm(hat_v.mean(axis=1), axis=-1)
+    hat_v, moving = _unit_vectors(vel)
+    n_moving = moving.sum(axis=1)
+    sum_hat = np.sum(hat_v * moving[..., None], axis=1)
+    mean_hat = np.zeros_like(sum_hat)
+    np.divide(sum_hat, n_moving[:, None], out=mean_hat, where=n_moving[:, None] > 0)
+    phi_trans = np.linalg.norm(mean_hat, axis=-1)
 
     centroid = pos.mean(axis=1, keepdims=True)
     q = pos - centroid
     q_norm = np.linalg.norm(q, axis=-1)
-    safe = q_norm > 1e-9
+    off_center = q_norm > _SPEED_EPS
     r_hat = np.zeros_like(q)
-    r_hat[..., 0] = np.where(safe, q[..., 0] / np.maximum(q_norm, 1e-12), 0.0)
-    r_hat[..., 1] = np.where(safe, q[..., 1] / np.maximum(q_norm, 1e-12), 0.0)
+    r_hat[..., 0] = np.where(off_center, q[..., 0] / np.maximum(q_norm, _EPS), 0.0)
+    r_hat[..., 1] = np.where(off_center, q[..., 1] / np.maximum(q_norm, _EPS), 0.0)
 
-    v_p = hat_v - hat_v.mean(axis=1, keepdims=True)
-    r_p = r_hat - r_hat.mean(axis=1, keepdims=True)
+    valid = moving & off_center
+    n_valid = valid.sum(axis=1)
+    sum_r = np.sum(r_hat * valid[..., None], axis=1)
+    sum_v = np.sum(hat_v * valid[..., None], axis=1)
+    r_bar = np.zeros_like(sum_r)
+    v_bar = np.zeros_like(sum_v)
+    np.divide(sum_r, n_valid[:, None], out=r_bar, where=n_valid[:, None] > 0)
+    np.divide(sum_v, n_valid[:, None], out=v_bar, where=n_valid[:, None] > 0)
+
+    r_p = np.where(valid[..., None], r_hat - r_bar[:, None, :], 0.0)
+    v_p = np.where(valid[..., None], hat_v - v_bar[:, None, :], 0.0)
     sum_v2 = np.sum(v_p[..., 0] ** 2 + v_p[..., 1] ** 2, axis=1)
     sum_r2 = np.sum(r_p[..., 0] ** 2 + r_p[..., 1] ** 2, axis=1)
     denom = np.sqrt(sum_v2 * sum_r2)
 
     phi_rad_pm = np.zeros(t)
-    np.divide(np.sum(v_p * r_p, axis=(1, 2)), denom, out=phi_rad_pm, where=denom > 1e-12)
+    np.divide(np.sum(r_p * v_p, axis=(1, 2)), denom, out=phi_rad_pm, where=denom > _EPS)
 
     cross_z = r_p[..., 0] * v_p[..., 1] - r_p[..., 1] * v_p[..., 0]
     phi_tan = np.zeros(t)
-    np.divide(np.abs(np.sum(cross_z, axis=1)), denom, out=phi_tan, where=denom > 1e-12)
+    np.divide(np.abs(np.sum(cross_z, axis=1)), denom, out=phi_tan, where=denom > _EPS)
 
     u = vel - vel.mean(axis=1, keepdims=True)
     u_norm2 = np.sum(u[..., 0] ** 2 + u[..., 1] ** 2, axis=1)
     cross_u = r_hat[..., 0] * u[..., 1] - r_hat[..., 1] * u[..., 0]
     phi_tan_unsigned = np.zeros(t)
-    np.divide(np.sum(cross_u ** 2, axis=1), u_norm2, out=phi_tan_unsigned, where=u_norm2 > 1e-12)
+    np.divide(np.sum(cross_u ** 2, axis=1), u_norm2, out=phi_tan_unsigned, where=u_norm2 > _EPS)
 
-    phi_local = _local_alignment(pos, hat_v, k=K_LOCAL)
+    phi_local = _local_alignment(pos, hat_v, moving, radius=R_LOCAL)
 
     return {
         "phi_trans": phi_trans,
@@ -127,18 +158,3 @@ def compute_order_params_series(
         "phi_tan_unsigned": phi_tan_unsigned,
         "phi_local": phi_local,
     }
-
-
-def aggregate_series(
-    series: dict[str, np.ndarray],
-    fps: float = 30.0,
-) -> dict[str, float]:
-    del fps  # reserved for future temporal derivatives
-    feat: dict[str, float] = {}
-    for k, arr in series.items():
-        feat[f"{k}_mean"] = float(np.mean(arr))
-        feat[f"{k}_std"] = float(np.std(arr))
-    return feat
-
-
-AGG_FEATURE_NAMES = [f"{k}_mean" for k in FEATURE_NAMES]

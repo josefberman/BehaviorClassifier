@@ -1,52 +1,16 @@
-"""Sliding-window aggregation and per-frame stacking of order parameters."""
+"""Non-overlapping 0.5 s windows of order-parameter means."""
 
 from __future__ import annotations
 
 import numpy as np
 
-from src.features.order_params import (
-    AGG_FEATURE_NAMES,
-    FEATURE_NAMES,
-    aggregate_series,
-    compute_order_params_series,
-)
+from src.features.order_params import FEATURE_NAMES, compute_order_params_series
+
+WINDOW_SEC = 0.5
 
 
-def segment_feature_vector(
-    positions: np.ndarray,
-    velocities: np.ndarray,
-    fps: float = 30.0,
-) -> dict[str, float]:
-    series = compute_order_params_series(positions, velocities)
-    return aggregate_series(series, fps=fps)
-
-
-def sliding_window_features(
-    positions: np.ndarray,
-    velocities: np.ndarray,
-    window_sec: float = 2.0,
-    hop_sec: float = 1.0,
-    fps: float = 30.0,
-) -> list[dict[str, float]]:
-    w = max(2, int(round(window_sec * fps)))
-    h = max(1, int(round(hop_sec * fps)))
-    t = positions.shape[0]
-    feats = []
-    for start in range(0, max(1, t - w + 1), h):
-        end = min(t, start + w)
-        if end - start < max(2, w // 2):
-            continue
-        feats.append(
-            segment_feature_vector(positions[start:end], velocities[start:end], fps=fps)
-        )
-    if not feats:
-        feats.append(segment_feature_vector(positions, velocities, fps=fps))
-    return feats
-
-
-def feature_dict_to_array(feat: dict[str, float], names: list[str] | None = None) -> np.ndarray:
-    names = names or AGG_FEATURE_NAMES
-    return np.array([feat.get(n, 0.0) for n in names], dtype=np.float64)
+def window_length(fps: float, window_sec: float = WINDOW_SEC) -> int:
+    return max(1, int(round(window_sec * fps)))
 
 
 def frame_feature_matrix(
@@ -56,9 +20,38 @@ def frame_feature_matrix(
     names: list[str] | None = None,
     fps: float = 30.0,
 ) -> np.ndarray:
-    """Per-frame classifier inputs: instantaneous order parameters."""
+    """Per-frame order parameters (T, 5)."""
     del fps
     names = names or list(FEATURE_NAMES)
     series = compute_order_params_series(positions, velocities)
     t = next(iter(series.values())).shape[0] if series else positions.shape[0]
-    return np.column_stack([np.asarray(series.get(name, np.zeros(t)), dtype=np.float64) for name in names])
+    return np.column_stack(
+        [np.asarray(series.get(name, np.zeros(t)), dtype=np.float64) for name in names]
+    )
+
+
+def window_feature_matrix(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    *,
+    window_sec: float = WINDOW_SEC,
+    hop_sec: float | None = None,
+    fps: float = 30.0,
+    names: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Means of the five order parameters over non-overlapping windows.
+
+    Windows shorter than `window_sec` are dropped. Returns (n_windows, 5)
+    features and the start frame of each window (relative to `positions`).
+    """
+    hop_sec = window_sec if hop_sec is None else hop_sec
+    names = names or list(FEATURE_NAMES)
+    X = frame_feature_matrix(positions, velocities, names=names, fps=fps)
+    t = X.shape[0]
+    w = window_length(fps, window_sec)
+    h = max(1, int(round(hop_sec * fps)))
+    if t < w:
+        return np.zeros((0, len(names)), dtype=np.float64), np.zeros(0, dtype=np.int64)
+    starts = np.arange(0, t - w + 1, h, dtype=np.int64)
+    rows = np.stack([X[s : s + w].mean(axis=0) for s in starts])
+    return rows, starts

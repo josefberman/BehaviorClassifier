@@ -1,4 +1,4 @@
-"""CSV / JSON / HDF5 IO matching real schooling-datasets schema."""
+"""CSV / JSON / HDF5 IO for schooling trajectory tables."""
 
 from __future__ import annotations
 
@@ -130,23 +130,6 @@ def mmss_to_frame(mmss: str, fps: float) -> int:
     else:
         raise ValueError(f"Bad timestamp: {mmss!r}")
     return int(round(total * fps))
-
-
-def save_motion_json(
-    path: Path,
-    dataset: str,
-    fps: float,
-    segments: list[dict],
-    source: str = "simulation",
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            {"dataset": dataset, "fps": fps, "source": source, "segments": segments},
-            f,
-            indent=2,
-        )
-        f.write("\n")
 
 
 def load_motion_json(path: Path) -> dict:
