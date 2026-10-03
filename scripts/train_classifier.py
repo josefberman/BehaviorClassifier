@@ -31,14 +31,25 @@ def main() -> None:
         default=WINDOW_SEC,
         help="Window length in seconds (default: 0.5)",
     )
+    parser.add_argument(
+        "--no-transitions",
+        "--stable-only",
+        action="store_true",
+        help="Train and evaluate on the five behaviors only; drop transition windows",
+    )
     args = parser.parse_args()
 
-    report = train_classifier(out_dir=args.out_dir, window_sec=args.window_sec)
+    report = train_classifier(
+        out_dir=args.out_dir,
+        window_sec=args.window_sec,
+        include_transitions=not args.no_transitions,
+    )
     oof = report["oof"]
     summary = {
         "n_windows": report["n_windows"],
         "n_videos": report["n_videos"],
-        "best_params": report["best_params"],
+        "include_transitions": report["include_transitions"],
+        "params": report["params"],
         "oof_macro_f1": oof["macro_f1"],
         "oof_balanced_accuracy": oof["balanced_accuracy"],
         "oof_accuracy": oof["accuracy"],

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
-from itertools import product
 from pathlib import Path
 
 import joblib
@@ -15,27 +13,23 @@ from xgboost import XGBClassifier
 from src.classify.eval import macro_f1, metrics as eval_metrics
 from src.features.dataset import build_real_xy
 from src.features.windows import WINDOW_SEC
-from src.labels import ALL_LABELS, ordered_labels
+from src.labels import label_set, ordered_labels
 
 ROOT = Path(__file__).resolve().parents[2]
 
-PARAM_GRID = {
-    "max_depth": [3, 5, 7],
-    "learning_rate": [0.05, 0.1],
-    "n_estimators": [200, 400],
-}
-
-DEFAULT_PARAMS = {"max_depth": 5, "learning_rate": 0.1, "n_estimators": 200}
-
-
-def _grid() -> list[dict]:
-    keys = list(PARAM_GRID)
-    return [dict(zip(keys, vals)) for vals in product(*PARAM_GRID.values())]
+XGB_PARAMS = {"max_depth": 6, "learning_rate": 0.05, "n_estimators": 500}
 
 
 def _inv_class_weights(y: np.ndarray) -> np.ndarray:
+    """Balanced weights: n / (n_classes * n_class).
+
+    Raw 1/n_class is too small for the majority class (traveling ≈ 3e-5 at
+    0.1 s windows) and falls under XGBoost's default min_child_weight=1, so
+    those samples never form leaves and the model never predicts traveling.
+    """
+    n = float(len(y))
     _, inv, counts = np.unique(y, return_inverse=True, return_counts=True)
-    return 1.0 / counts[inv].astype(np.float64)
+    return n / (len(counts) * counts[inv].astype(np.float64))
 
 
 def _fit_xgb(X: np.ndarray, y: np.ndarray, params: dict) -> tuple[XGBClassifier, LabelEncoder]:
@@ -58,68 +52,33 @@ def _predict(model: XGBClassifier, le: LabelEncoder, X: np.ndarray) -> np.ndarra
     return le.inverse_transform(raw)
 
 
-def _inner_score(
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-    params: dict,
-    inner_videos: np.ndarray,
-) -> float:
-    scores: list[float] = []
-    for held in inner_videos:
-        tr = groups != held
-        te = groups == held
-        if not tr.any() or not te.any():
-            continue
-        if len(np.unique(y[tr])) < 2:
-            continue
-        model, le = _fit_xgb(X[tr], y[tr], params)
-        pred = _predict(model, le, X[te])
-        scores.append(macro_f1(y[te], pred))
-    if not scores:
-        return float("-inf")
-    return float(np.mean(scores))
-
-
-def _select_params(
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-) -> dict:
-    videos = np.unique(groups)
-    if len(videos) < 2:
-        return dict(DEFAULT_PARAMS)
-    best_params = dict(DEFAULT_PARAMS)
-    best_score = float("-inf")
-    for params in _grid():
-        score = _inner_score(X, y, groups, params, videos)
-        if score > best_score:
-            best_score = score
-            best_params = dict(params)
-    return best_params
-
-
 def train_classifier(
     out_dir: Path | None = None,
     window_sec: float = WINDOW_SEC,
+    include_transitions: bool = True,
 ) -> dict:
     out_dir = out_dir or (ROOT / "results")
     out_dir.mkdir(parents=True, exist_ok=True)
+    classes = label_set(include_transitions=include_transitions)
 
-    X, y, groups, feat_names, _meta = build_real_xy(window_sec=window_sec)
+    X, y, groups, feat_names, _meta = build_real_xy(
+        window_sec=window_sec,
+        include_transitions=include_transitions,
+    )
     if len(X) == 0:
         raise RuntimeError("No training windows — check annotations and schooling-datasets")
 
     videos = np.unique(groups)
+    params = dict(XGB_PARAMS)
     print(
         f"windows={len(X)}  videos={len(videos)}  "
-        f"classes_present={len(np.unique(y))}  grid={len(_grid())} configs"
+        f"classes_present={len(np.unique(y))}  transitions={include_transitions}  "
+        f"params={params}"
     )
 
     oof_true: list[str] = []
     oof_pred: list[str] = []
     fold_reports: list[dict] = []
-    fold_params: list[dict] = []
 
     for held in videos:
         tr = groups != held
@@ -127,7 +86,6 @@ def train_classifier(
         if not te.any() or len(np.unique(y[tr])) < 2:
             print(f"skip video {held}: empty test or <2 train classes")
             continue
-        params = _select_params(X[tr], y[tr], groups[tr])
         model, le = _fit_xgb(X[tr], y[tr], params)
         pred = _predict(model, le, X[te])
         y_te = y[te]
@@ -135,40 +93,36 @@ def train_classifier(
             "held_out": str(held),
             "n_train": int(tr.sum()),
             "n_test": int(te.sum()),
-            "best_params": params,
+            "params": params,
             "macro_f1": macro_f1(y_te, pred),
         }
         fold_reports.append(fold)
-        fold_params.append(params)
         oof_true.extend(y_te.tolist())
         oof_pred.extend(pred.tolist())
-        print(f"held_out={held}  n_test={fold['n_test']}  macro_f1={fold['macro_f1']:.4f}  params={params}")
+        pred_counts = {lab: int(np.sum(pred == lab)) for lab in ordered_labels(np.unique(y_te))}
+        print(
+            f"held_out={held}  n_test={fold['n_test']}  "
+            f"macro_f1={fold['macro_f1']:.4f}  pred={pred_counts}"
+        )
 
     y_true = np.array(oof_true, dtype=object)
     y_pred = np.array(oof_pred, dtype=object)
-    pooled = eval_metrics(y_true, y_pred)
+    pooled = eval_metrics(y_true, y_pred, include_transitions=include_transitions)
 
-    param_counts = Counter(tuple(sorted(p.items())) for p in fold_params)
-    if param_counts:
-        winner = param_counts.most_common(1)[0][0]
-        final_params = dict(winner)
-    else:
-        final_params = dict(DEFAULT_PARAMS)
-
-    final_model, final_le = _fit_xgb(X, y, final_params)
+    final_model, final_le = _fit_xgb(X, y, params)
     present_labels = ordered_labels(np.unique(y))
 
     report = {
         "n_windows": int(len(X)),
         "n_videos": int(len(videos)),
         "window_sec": float(window_sec),
+        "include_transitions": include_transitions,
         "features": feat_names,
-        "all_labels": list(ALL_LABELS),
+        "all_labels": list(classes),
         "fitted_labels": [str(c) for c in final_le.classes_],
         "n_classes_fitted": int(len(final_le.classes_)),
-        "label_counts": {lab: int(np.sum(y == lab)) for lab in ALL_LABELS},
-        "best_params": final_params,
-        "fold_params": fold_params,
+        "label_counts": {lab: int(np.sum(y == lab)) for lab in classes},
+        "params": params,
         "folds": fold_reports,
         "oof": pooled,
     }
@@ -180,10 +134,11 @@ def train_classifier(
             "model": final_model,
             "label_encoder": final_le,
             "feature_names": feat_names,
-            "all_labels": list(ALL_LABELS),
+            "all_labels": list(classes),
             "fitted_labels": present_labels,
-            "best_params": final_params,
+            "params": params,
             "window_sec": float(window_sec),
+            "include_transitions": include_transitions,
         },
         model_path,
     )

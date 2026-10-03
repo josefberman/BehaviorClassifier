@@ -46,6 +46,10 @@ def is_behavior(label: str) -> bool:
     return label in BEHAVIORS
 
 
+def label_set(*, include_transitions: bool = True) -> tuple[str, ...]:
+    return ALL_LABELS if include_transitions else BEHAVIORS
+
+
 def ordered_labels(present) -> list[str]:
     """Canonical class order, then leftover labels."""
     present_set = set(present)

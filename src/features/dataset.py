@@ -10,7 +10,7 @@ import numpy as np
 from src.features.order_params import FEATURE_NAMES
 from src.features.windows import WINDOW_SEC, window_feature_matrix
 from src.io import load_motion_json, load_trajectory_csv, mmss_to_frame
-from src.labels import canonicalize, load_aliases
+from src.labels import canonicalize, is_transition, load_aliases
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -62,9 +62,12 @@ def load_real_segments(
 
 def build_real_xy(
     window_sec: float = WINDOW_SEC,
+    include_transitions: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[dict]]:
     """Return window features, labels, video ids, feature names, and row metadata."""
     segs = load_real_segments()
+    if not include_transitions:
+        segs = [s for s in segs if not is_transition(s["label"])]
     cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     xs, ys, groups, kept = [], [], [], []
     names = list(FEATURE_NAMES)

@@ -21,9 +21,9 @@ Each sample is the mean of five per-frame order parameters over a non-overlappin
 - **φ_trans** — magnitude of the mean unit heading (moving fish only).
 - **φ_tan**, **φ_rad^±** — anisotropy-corrected correlations: center `r̂` and `v̂` by their school means, then `φ_tan = |∑ (r' × v')_z| / D` and `φ_rad^± = (∑ r' · v') / D`.
 - **φ_tan^unsigned** — fraction of centroid-relative kinetic energy in the tangential direction. Clockwise and counterclockwise both add.
-- **φ_local** — mean, over fish with at least one neighbor inside radius **90**, of the magnitude of the mean unit heading of those neighbors (focal fish excluded).
+- **φ_local** — mean, over fish with at least one neighbor, of the magnitude of the mean unit heading of up to **5** nearest neighbors inside radius **90** (focal fish excluded).
 
-Degenerate frames: zero speed omits that fish from heading averages; a fish at the centroid is omitted from `r̂`; a vanishing correlation denominator, no centroid-relative motion, or no neighbor inside 90 yield 0 for the corresponding feature.
+Degenerate frames: zero speed omits that fish from heading averages; a fish at the centroid is omitted from `r̂`; a vanishing correlation denominator, no centroid-relative motion, or no moving neighbor inside radius 90 yield 0 for the corresponding feature.
 
 ## Layout
 
@@ -46,12 +46,15 @@ pip install -r requirements.txt
 
 ## Train
 
-Leave-one-video-out over the 10 dataset ids. Inner leave-one-video-out selects `max_depth`, `learning_rate`, and `n_estimators` by macro-F1. Sample weights are `1 / n_class`. Reported scores are the pooled out-of-fold predictions. A model is then refit on all windows.
+Leave-one-video-out over the 10 dataset ids. Trees use `max_depth=6`, `learning_rate=0.05`, `n_estimators=500`. Sample weights are `n / (n_classes · n_class)` so each class contributes equally without dropping below XGBoost’s `min_child_weight`. Reported scores are the pooled out-of-fold predictions. A model is then refit on all windows.
 
 ```bash
 python scripts/train_classifier.py
+python scripts/train_classifier.py --no-transitions
 python scripts/plot_confusion.py
 ```
+
+`--no-transitions` (`--stable-only`) drops every `a_to_b` window so training and leave-one-video-out use only `traveling`, `milling`, `shoaling`, `expansion`, and `compaction`.
 
 Outputs:
 

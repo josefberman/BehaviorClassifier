@@ -13,6 +13,7 @@ FEATURE_NAMES = (
 )
 
 R_LOCAL = 90.0
+K_LOCAL = 5
 _EPS = 1e-12
 _SPEED_EPS = 1e-9
 
@@ -30,16 +31,18 @@ def _local_alignment(
     hat_v: np.ndarray,
     moving: np.ndarray,
     radius: float = R_LOCAL,
+    k: int = K_LOCAL,
 ) -> np.ndarray:
-    """Mean neighborhood polarization for neighbors strictly inside `radius`.
+    """Mean neighborhood polarization using up to `k` nearest moving neighbors
+    strictly inside `radius`.
 
-    The focal fish is excluded. Zero-speed neighbors are omitted from the
-    heading average. Fish with no valid neighbor are skipped; if none remain,
-    the frame value is 0.
+    The focal fish is excluded. Zero-speed neighbors are omitted. Fish with no
+    valid neighbor are skipped; if none remain, the frame value is 0.
     """
     t, n, _ = pos.shape
     if n <= 1:
         return np.zeros(t)
+    k = min(int(k), n - 1)
     r2 = float(radius) ** 2
     out = np.zeros(t)
     step = 64 if n * n * 64 * 8 < 256 * 1024 * 1024 else max(1, 8_000_000 // max(n * n, 1))
@@ -53,10 +56,15 @@ def _local_alignment(
         delta = block[:, :, None, :] - block[:, None, :, :]
         d2 = np.einsum("tijn,tijn->tij", delta, delta)
         d2[:, idx, idx] = np.inf
-        neigh = (d2 < r2) & mv[:, None, :]
-        counts = neigh.sum(axis=2)
+        d2 = np.where((d2 < r2) & mv[:, None, :], d2, np.inf)
+        nn = np.argpartition(d2, kth=k - 1, axis=-1)[..., :k]
+        t_idx = np.arange(tb)[:, None, None]
+        i_idx = np.arange(n)[None, :, None]
+        valid = np.isfinite(d2[t_idx, i_idx, nn])
+        neigh_v = hv[t_idx, nn]
+        counts = valid.sum(axis=-1)
         has = counts > 0
-        summed = np.einsum("tij,tjk->tik", neigh.astype(np.float64), hv)
+        summed = np.sum(np.where(valid[..., None], neigh_v, 0.0), axis=2)
         mean_v = np.zeros_like(summed)
         np.divide(summed, counts[..., None], out=mean_v, where=has[..., None])
         mags = np.linalg.norm(mean_v, axis=-1)
@@ -94,35 +102,49 @@ def compute_order_params_series(
         fish at the centroid  — omit from r̂; it does not enter Φ_tan or Φ_rad^±
         D ≈ 0                 — Φ_tan = Φ_rad^± = 0
         no centroid-relative motion — Φ_tan^unsigned = 0
-        no neighbor inside R_LOCAL — skip that fish in Φ_local; if none remain, 0
+        no moving neighbor inside R_LOCAL among the K_LOCAL nearest — skip that
+                                fish in Φ_local; if none remain, 0
     """
+    # Convert positions and velocities to float arrays
     pos = np.asarray(positions, dtype=np.float64)
     vel = np.asarray(velocities, dtype=np.float64)
+
+    # If input is only a single frame, expand dims for consistent processing (T, N, 2)
     if pos.ndim == 2:
         pos = pos[None, ...]
         vel = vel[None, ...]
     t, n, _ = pos.shape
+
+    # Handle case with no individuals: return zero arrays for each feature
     if n == 0:
         z = np.zeros(t)
         return {k: z.copy() for k in FEATURE_NAMES}
 
+    # Compute unit velocity vectors and a boolean mask for moving fish (speed > _SPEED_EPS)
     hat_v, moving = _unit_vectors(vel)
-    n_moving = moving.sum(axis=1)
-    sum_hat = np.sum(hat_v * moving[..., None], axis=1)
-    mean_hat = np.zeros_like(sum_hat)
-    np.divide(sum_hat, n_moving[:, None], out=mean_hat, where=n_moving[:, None] > 0)
+
+    # --- φ_trans: Translational global order ---
+    # Mean of the unit velocity vectors for each timepoint
+    mean_hat = hat_v.mean(axis=1)
+    # Magnitude of mean unit velocity: global alignment of fish velocities
     phi_trans = np.linalg.norm(mean_hat, axis=-1)
 
-    centroid = pos.mean(axis=1, keepdims=True)
-    q = pos - centroid
-    q_norm = np.linalg.norm(q, axis=-1)
-    off_center = q_norm > _SPEED_EPS
+    # --- Center and normalize positions to school centroid direction vectors (r̂) ---
+    centroid = pos.mean(axis=1, keepdims=True)      # Centroid position per frame
+    q = pos - centroid                             # Vector from centroid to each fish
+    q_norm = np.linalg.norm(q, axis=-1)            # Distance from centroid
+    off_center = q_norm > _SPEED_EPS               # Exclude fish at centroid (numerical stability)
+
+    # Compute unit direction ("r̂") from centroid, handle near-zero division robustly
     r_hat = np.zeros_like(q)
     r_hat[..., 0] = np.where(off_center, q[..., 0] / np.maximum(q_norm, _EPS), 0.0)
     r_hat[..., 1] = np.where(off_center, q[..., 1] / np.maximum(q_norm, _EPS), 0.0)
 
+    # --- Mask for fish with valid velocity and not at centroid ---
     valid = moving & off_center
-    n_valid = valid.sum(axis=1)
+    n_valid = valid.sum(axis=1)  # Number of valid fish per frame
+
+    # Compute mean r̂ and mean v̂ over valid fish
     sum_r = np.sum(r_hat * valid[..., None], axis=1)
     sum_v = np.sum(hat_v * valid[..., None], axis=1)
     r_bar = np.zeros_like(sum_r)
@@ -130,26 +152,49 @@ def compute_order_params_series(
     np.divide(sum_r, n_valid[:, None], out=r_bar, where=n_valid[:, None] > 0)
     np.divide(sum_v, n_valid[:, None], out=v_bar, where=n_valid[:, None] > 0)
 
+    # --- Centered r̂ and v̂: subtract their means from each fish ("primed" fields) ---
     r_p = np.where(valid[..., None], r_hat - r_bar[:, None, :], 0.0)
     v_p = np.where(valid[..., None], hat_v - v_bar[:, None, :], 0.0)
+
+    # Sum of squares of centered v̂ and r̂ for denominator in correlation order params
     sum_v2 = np.sum(v_p[..., 0] ** 2 + v_p[..., 1] ** 2, axis=1)
     sum_r2 = np.sum(r_p[..., 0] ** 2 + r_p[..., 1] ** 2, axis=1)
-    denom = np.sqrt(sum_v2 * sum_r2)
+    denom = np.sqrt(sum_v2 * sum_r2)  # Anisotropy-correction normalization
 
+    # --- φ_rad_pm: Radial correlation (dot product) ---
     phi_rad_pm = np.zeros(t)
-    np.divide(np.sum(r_p * v_p, axis=(1, 2)), denom, out=phi_rad_pm, where=denom > _EPS)
+    np.divide(
+        np.sum(r_p * v_p, axis=(1, 2)),
+        denom,
+        out=phi_rad_pm,
+        where=denom > _EPS,
+    )
 
+    # --- φ_tan: Tangential correlation (z-component of cross product, summed) ---
     cross_z = r_p[..., 0] * v_p[..., 1] - r_p[..., 1] * v_p[..., 0]
     phi_tan = np.zeros(t)
-    np.divide(np.abs(np.sum(cross_z, axis=1)), denom, out=phi_tan, where=denom > _EPS)
+    np.divide(
+        np.abs(np.sum(cross_z, axis=1)),
+        denom,
+        out=phi_tan,
+        where=denom > _EPS,
+    )
 
-    u = vel - vel.mean(axis=1, keepdims=True)
+    # --- φ_tan_unsigned: "Unsigned tangential fraction" (energy) ---
+    # Computes fraction of school velocity variance along tangential direction
+    u = vel - vel.mean(axis=1, keepdims=True)  # Centered velocities
     u_norm2 = np.sum(u[..., 0] ** 2 + u[..., 1] ** 2, axis=1)
     cross_u = r_hat[..., 0] * u[..., 1] - r_hat[..., 1] * u[..., 0]
     phi_tan_unsigned = np.zeros(t)
-    np.divide(np.sum(cross_u ** 2, axis=1), u_norm2, out=phi_tan_unsigned, where=u_norm2 > _EPS)
+    np.divide(
+        np.sum(cross_u ** 2, axis=1),
+        u_norm2,
+        out=phi_tan_unsigned,
+        where=u_norm2 > _EPS,
+    )
 
-    phi_local = _local_alignment(pos, hat_v, moving, radius=R_LOCAL)
+    # --- φ_local: Mean local alignment among up to K_LOCAL neighbors inside R_LOCAL ---
+    phi_local = _local_alignment(pos, hat_v, moving, radius=R_LOCAL, k=K_LOCAL)
 
     return {
         "phi_trans": phi_trans,
